@@ -1,26 +1,30 @@
 # Setup notes:
-`
+You should be using venv:
+```
 python -m venv env
-
 source env/bin/activate
-`
+```
 
-make sure .env is configured! (template .env.template included)
+make sure .env is configured (template .env.template included):
+```
+cp .env.template .env
+```
 
-make sure nltk libs are setup!
-
-`
+make sure nltk libs are setup:
+```
 import nltk
-
 nltk.download('vader_lexicon')
-
 nltk.download('stopwords')
-
 nltk.download('punkt')
-`
+```
 
-# to run:
+# To run:
+```
 python anal.py
+```
 
-# when done modifying:
+# When done modifying:
+Make sure requirements are updated!
+```
 pip freeze > requirements.txt
+```
