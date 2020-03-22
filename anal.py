@@ -3,7 +3,7 @@ import os
 import csv
 import spacy
 import pandas as pd
-from re import sub
+import re
 import streamlit as st
 from spacy import displacy
 
@@ -14,11 +14,16 @@ SPACY_MODEL_NAMES = ["en_core_web_sm", "en_core_web_md"]
 HTML_WRAPPER = """<div style="overflow-x: auto; border: 1px solid #e6e9ef; border-radius: 0.25rem; padding: 1rem; margin-bottom: 2.5rem">{}</div>"""
 
 def kebab(s):
-  return sub(
+  return re.sub(
     r"(\s|_|-)+","-",
-    sub(
+    re.sub(
       r"[A-Z]{2,}(?=[A-Z][a-z]+[0-9]*|\b)|[A-Z]?[a-z]+[0-9]*|[A-Z]|[0-9]+",
       lambda mo: mo.group(0).lower(), s))
+
+def cleanhtml(raw_html):
+    cleanr = re.compile('<.*?>')
+    cleantext = re.sub(cleanr, '', raw_html)
+    return cleantext
 
 reddit = praw.Reddit(client_id=os.getenv('client_id'),
     client_secret=os.getenv('client_secret'),
@@ -33,14 +38,18 @@ patterns = []
 # website, logo, ceo, exchange, market cap, sector, tag_1, tag_2, tag_3
 with open('companies.csv') as csvfile:
     reader = csv.DictReader(csvfile)
-    for row in reader:
+    for row in reader: #GILD AND $GILD
         patterns.append({
             "label": "STOCK", 
             "pattern":row["ticker"], 
             "id":kebab(row["short_name"])})
+        patterns.append({
+            "label": "STOCK", 
+            "pattern": "$"+row["ticker"], 
+            "id":kebab(row["short_name"])})
 
 def combined(submission):
-    return submission.title + " " + submission.selftext
+    return submission.title + " " + cleanhtml(submission.selftext_html)
 
 def u(url):
     return reddit.submission(url=url)
@@ -82,94 +91,49 @@ text = url_to_text(url)
 doc = process_text(spacy_model, text)
 
 
-if "parser" in nlp.pipe_names:
-    st.header("Dependency Parse & Part-of-speech tags")
-    st.sidebar.header("Dependency Parse")
-    split_sents = st.sidebar.checkbox("Split sentences", value=True)
-    collapse_punct = st.sidebar.checkbox("Collapse punctuation", value=True)
-    collapse_phrases = st.sidebar.checkbox("Collapse phrases")
-    compact = st.sidebar.checkbox("Compact mode")
-    options = {
-        "collapse_punct": collapse_punct,
-        "collapse_phrases": collapse_phrases,
-        "compact": compact,
-    }
-    docs = [span.as_doc() for span in doc.sents] if split_sents else [doc]
-    for sent in docs:
-        html = displacy.render(sent, options=options)
-        # Double newlines seem to mess with the rendering
-        html = html.replace("\n\n", "\n")
-        if split_sents and len(docs) > 1:
-            st.markdown(f"> {sent.text}")
-        st.write(HTML_WRAPPER.format(html), unsafe_allow_html=True)
+st.header("Named Entities")
+st.sidebar.header("Named Entities")
+label_set = nlp.get_pipe("ner").labels
+labels = st.sidebar.multiselect(
+    "Entity labels", options=label_set, default=list(label_set)
+)
+html = displacy.render(doc, style="ent", options={"ents": labels})
+# Newlines seem to mess with the rendering
+html = html.replace("\n", " ")
+st.write(HTML_WRAPPER.format(html), unsafe_allow_html=True)
+attrs = ["text", "label_", "ent_id_", "start", "end", "start_char", "end_char"]
+if "entity_linker" in nlp.pipe_names:
+    attrs.append("kb_id_")
+data = [
+    [str(getattr(ent, attr)) for attr in attrs]
+    for ent in doc.ents
+    #if ent.label_ in labels
+]
+df = pd.DataFrame(data, columns=attrs)
+st.dataframe(df)
 
-if "ner" in nlp.pipe_names:
-    st.header("Named Entities")
-    st.sidebar.header("Named Entities")
-    label_set = nlp.get_pipe("ner").labels
-    labels = st.sidebar.multiselect(
-        "Entity labels", options=label_set, default=list(label_set)
-    )
-    html = displacy.render(doc, style="ent", options={"ents": labels})
-    # Newlines seem to mess with the rendering
-    html = html.replace("\n", " ")
-    st.write(HTML_WRAPPER.format(html), unsafe_allow_html=True)
-    attrs = ["text", "label_", "start", "end", "start_char", "end_char"]
-    if "entity_linker" in nlp.pipe_names:
-        attrs.append("kb_id_")
-    data = [
-        [str(getattr(ent, attr)) for attr in attrs]
-        for ent in doc.ents
-        if ent.label_ in labels
-    ]
-    df = pd.DataFrame(data, columns=attrs)
-    st.dataframe(df)
-
-
-if "textcat" in nlp.pipe_names:
-    st.header("Text Classification")
-    st.markdown(f"> {text}")
-    df = pd.DataFrame(doc.cats.items(), columns=("Label", "Score"))
-    st.dataframe(df)
-
-
-vector_size = nlp.meta.get("vectors", {}).get("width", 0)
-if vector_size:
-    st.header("Vectors & Similarity")
-    st.code(nlp.meta["vectors"])
-    text1 = st.text_input("Text or word 1", "apple")
-    text2 = st.text_input("Text or word 2", "orange")
-    doc1 = process_text(spacy_model, text1)
-    doc2 = process_text(spacy_model, text2)
-    similarity = doc1.similarity(doc2)
-    if similarity > 0.5:
-        st.success(similarity)
-    else:
-        st.error(similarity)
 
 st.header("Token attributes")
-
-if st.button("Show token attributes"):
-    attrs = [
-        "idx",
-        "text",
-        "lemma_",
-        "pos_",
-        "tag_",
-        "dep_",
-        "head",
-        "ent_type_",
-        "ent_iob_",
-        "shape_",
-        "is_alpha",
-        "is_ascii",
-        "is_digit",
-        "is_punct",
-        "like_num",
-    ]
-    data = [[str(getattr(token, attr)) for attr in attrs] for token in doc]
-    df = pd.DataFrame(data, columns=attrs)
-    st.dataframe(df)
+attrs = [
+    "idx",
+    "text",
+    "lemma_",
+    "pos_",
+    "tag_",
+    "dep_",
+    "head",
+    "ent_type_",
+    "ent_iob_",
+    "shape_",
+    "is_alpha",
+    "is_ascii",
+    "is_digit",
+    "is_punct",
+    "like_num",
+]
+data = [[str(getattr(token, attr)) for attr in attrs] for token in doc]
+df = pd.DataFrame(data, columns=attrs)
+st.dataframe(df)
 
 
 st.header("JSON Doc")
