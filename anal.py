@@ -3,6 +3,9 @@ import os
 import csv
 import spacy
 import pandas as pd
+import nltk
+from nltk.corpus import stopwords
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import re
 import streamlit as st
 from spacy import displacy
@@ -10,8 +13,13 @@ from spacy import displacy
 from dotenv import load_dotenv
 load_dotenv()
 
+#nltk.download('vader_lexicon')
+#nltk.download('stopwords')
+#nltk.download('punkt')
+
 SPACY_MODEL_NAMES = ["en_core_web_sm", "en_core_web_md"]
 HTML_WRAPPER = """<div style="overflow-x: auto; border: 1px solid #e6e9ef; border-radius: 0.25rem; padding: 1rem; margin-bottom: 2.5rem">{}</div>"""
+ATTRS = ["line", "compound", "neg", "neu", "pos", "found_tickers"]
 
 def kebab(s):
   return re.sub(
@@ -33,126 +41,125 @@ reddit = praw.Reddit(client_id=os.getenv('client_id'),
 reddit.read_only = True
 wsb = reddit.subreddit('wallstreetbets')
 
+easy_patterns = {}
 patterns = []
 # ticker, company_name, short_name, industry, description,
 # website, logo, ceo, exchange, market cap, sector, tag_1, tag_2, tag_3
 with open('companies.csv') as csvfile:
     reader = csv.DictReader(csvfile)
     for row in reader: #GILD AND $GILD
+        tick = row["ticker"]
+        big_tick = "$"+tick
+        
+        short_name = kebab(row["short_name"])
+
+        easy_patterns[tick] = short_name
+        easy_patterns[big_tick] = short_name
+
         patterns.append({
             "label": "STOCK", 
-            "pattern":row["ticker"], 
-            "id":kebab(row["short_name"])})
+            "pattern":tick,
+            "id": short_name})
         patterns.append({
             "label": "STOCK", 
-            "pattern": "$"+row["ticker"], 
-            "id":kebab(row["short_name"])})
+            "pattern": big_tick,
+            "id": short_name})
+
+def force_sentence(text): #todo: could be cleaner
+    return text + "."
 
 def combined(submission):
-    return submission.title + " " + cleanhtml(submission.selftext_html)
+    submission.comments.replace_more(limit=None) # make sure we get ALL comments
+    header = [submission.title, cleanhtml(submission.selftext_html or "")]
+    sub = header.copy()
+    sub.extend(map(lambda x: cleanhtml(x.body_html), list(submission.comments) )) # clean of html 
+    sub = map(lambda x: force_sentence(x), sub)
+    return ("\n".join(header), " ".join(sub))
 
 def u(url):
     return reddit.submission(url=url)
 
 @st.cache(allow_output_mutation=True)
-def load_model(name):
-    nlp = spacy.load(name)
-    ruler = spacy.pipeline.EntityRuler(nlp)
-    ruler.add_patterns(patterns)
-    nlp.add_pipe(ruler)
-    return nlp
-
-@st.cache(allow_output_mutation=True)
-def process_text(model_name, text):
-    nlp = load_model(model_name)
-    return nlp(text)
-
-@st.cache(allow_output_mutation=True)
 def url_to_text(url):
     return combined(u(url))
 
+sid = SentimentIntensityAnalyzer()
+stop_words = set(stopwords.words('english'))
+stop_words.add("I")
 
-st.sidebar.title("Interactive WSB sentiment visualizer")
-st.sidebar.markdown(
+def upsert(db, key):
+    db[key] = db.get(key, 0) + 1
+    return db
+
+@st.cache(allow_output_mutation=True)
+def process_text(text):
+
+    tick_count = {}
+    ret = []
+
+    for line in nltk.tokenize.sent_tokenize(text):
+        words = [word for word in nltk.tokenize.word_tokenize(line) if word not in stop_words]
+        found_tickers = []
+
+        for word in words:
+            if easy_patterns.get(word, None):
+                upsert(tick_count, word)
+                found_tickers.append(word)
+
+        ss = sid.polarity_scores(line)
+        # compound: 0.8316, neg: 0.0, neu: 0.254, pos: 0.746,
+
+        ret.append((line, ss['compound'], ss['neg'], ss['neu'], ss['pos'], found_tickers))
+
+    return (tick_count, ret)
+
+
+def st():
+    st.sidebar.title("Interactive WSB sentiment visualizer")
+    st.sidebar.markdown(
+        """
+    Process text with spacy models and visualize named entities,
+    dependencies and more. Uses spaCy's built-in
+    [displaCy](http://spacy.io/usage/visualizers) visualizer under the hood.
     """
-Process text with spacy models and visualize named entities,
-dependencies and more. Uses spaCy's built-in
-[displaCy](http://spacy.io/usage/visualizers) visualizer under the hood.
-"""
-)
+    )
 
-spacy_model = st.sidebar.selectbox("Model name", SPACY_MODEL_NAMES)
-model_load_state = st.info(f"Loading model '{spacy_model}'...")
-nlp = load_model(spacy_model)
-model_load_state.empty()
+    url = st.text_area("Reddit URL to analyze", "https://www.reddit.com/r/wallstreetbets/comments/fmh129")
+    (header, text) = url_to_text(url)
+    (tickers, data) = process_text(text)
+    sorted_t_count = {k: v for k, v in sorted(tickers.items(), key=lambda item: item[1], reverse=True)}
 
-url = st.text_area("Reddit URL to analyze", "https://www.reddit.com/r/wallstreetbets/comments/fmh129")
-text = url_to_text(url)
-doc = process_text(spacy_model, text)
+    st.header("TEEEXXXTTT")
+    st.write(HTML_WRAPPER.format(header), unsafe_allow_html=True)
+    df = pd.DataFrame(data, columns=ATTRS)
+    st.dataframe(df)
+    st.write(sorted_t_count)
 
+    st.header("Winner")
+    winning = list(sorted_t_count)[0]
+    st.write(winning + " - " + str(sorted_t_count.get(winning))) #assumes we always get a ticker
+    df_with = df[df['found_tickers'].str.contains(winning, regex=False)]
 
-st.header("Named Entities")
-st.sidebar.header("Named Entities")
-label_set = nlp.get_pipe("ner").labels
-labels = st.sidebar.multiselect(
-    "Entity labels", options=label_set, default=list(label_set)
-)
-html = displacy.render(doc, style="ent", options={"ents": labels})
-# Newlines seem to mess with the rendering
-html = html.replace("\n", " ")
-st.write(HTML_WRAPPER.format(html), unsafe_allow_html=True)
-attrs = ["text", "label_", "ent_id_", "start", "end", "start_char", "end_char"]
-if "entity_linker" in nlp.pipe_names:
-    attrs.append("kb_id_")
-data = [
-    [str(getattr(ent, attr)) for attr in attrs]
-    for ent in doc.ents
-    #if ent.label_ in labels
-]
-df = pd.DataFrame(data, columns=attrs)
-st.dataframe(df)
+    st.header("Avg without filtering by ticker")
+    st.dataframe(df.mean())
+
+    st.header("Avg WITH filtering by ticker")
+    st.dataframe(df_with.mean())
 
 
-st.header("Token attributes")
-attrs = [
-    "idx",
-    "text",
-    "lemma_",
-    "pos_",
-    "tag_",
-    "dep_",
-    "head",
-    "ent_type_",
-    "ent_iob_",
-    "shape_",
-    "is_alpha",
-    "is_ascii",
-    "is_digit",
-    "is_punct",
-    "like_num",
-]
-data = [[str(getattr(token, attr)) for attr in attrs] for token in doc]
-df = pd.DataFrame(data, columns=attrs)
-st.dataframe(df)
 
 
-st.header("JSON Doc")
-if st.button("Show JSON Doc"):
-    st.json(doc.to_json())
-
-st.header("JSON model meta")
-if st.button("Show JSON model meta"):
-    st.json(nlp.meta)
-
-'''
 for submission in wsb.stream.submissions():
-    submission.author
-    submission.id
-    submission.title
-    submission.created_utc
-    submission.permalink
-    submission.score
-    submission.selftext
-    sub = nlp(combined(submission))
-    list(submission.comments)
-'''
+    print(submission.title + "("+ str(submission.score) +")" + " \n" + submission.permalink)
+    (header, text) = combined(submission)
+    (tickers, data) = process_text(text)
+    sorted_t_count = {k: v for k, v in sorted(tickers.items(), key=lambda item: item[1], reverse=True)}
+    df = pd.DataFrame(data, columns=ATTRS)
+    try:
+        winning = list(sorted_t_count)[0] # may not have found a ticker
+        df_with = df[df['found_tickers'].str.contains(winning, regex=False)]
+        print(winning + " - " + str(sorted_t_count.get(winning)))
+        print(pd.concat((df.mean(), df_with.mean()), axis=1))
+    except:
+        pass
+    print('\n')
